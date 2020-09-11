@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+# -*- coding:utf-8 -*-
 
 '''
 This script scrapes a list of websites in a txt file for their text content
@@ -20,13 +21,13 @@ def log(message:str):
     '''Writes a specified message to a log file including timestamp.'''
     print(message)
     # Creating or appending the log file and appending the message:
-    file = open('log.txt', 'a')
+    file = open('scrape_log.txt', 'a')
     file.write(str(pd.Timestamp.today()) + " " + message + "\n")
     file.close()
 
 def robot(url:str) -> list:
     '''Stores all sites and content disallowed by the robot.txt in a list.'''
-    r = url + "/robots.txt"
+    r = re.search("[^/]*//[^/]*", url).group() + "/robots.txt"
     disallow = [] # list storing urls of all disallowed content of a site
 
     try:
@@ -76,22 +77,23 @@ def scrape(url:str, main:bool, disallow:list=[]):
             soup = BeautifulSoup(response.text, "lxml")
             try:
                 print("Scraping " + url)
-                # Function to clean the whitespace of the site:
-                clean = lambda txt: txt.replace("\t", "").replace("\n", "").replace("\r", "").replace("\xa0", " ")
                 # Storing the title of the site:
-                title = clean(soup.title.string)
+                if soup.title.string:
+                    title = soup.title.string
+                else:
+                    title
                 # Storing the text of the site:
-                text = clean(soup.get_text(" ", strip=True))
+                text = soup.get_text("\r\n", strip=True)
             except:
                 # If no text could be scraped, return a warning message:
                 log("Warning! No text could be scraped for " + url) # log message
             else:
                 # Append the scraped information to the list of contents:
                 timestamp = str(pd.Timestamp.today().date())
-                contents.append((re.search("[^/]*//[^/]*", url).group(), url, title, text.replace(title, ""), timestamp))
+                contents.append((re.search("[^/]*//[^/]*", url).group(), url, title, text.replace(title, "")[2:], timestamp))
 
             if main:
-                # If the scraped site is the main site the also collect all available links to sub-sites:
+                # If the scraped site is the main site also collect all available links to sub-sites:
                 for a in soup.findAll('a', href=True):
                     href = a['href']
                     # Checking if the href is not part of the disallow list, that it is not a reference back to the
@@ -121,21 +123,21 @@ def validate(df:pd.DataFrame):
             # Check for duplicate lines in the table
             log("Validity check: duplicates detected")
 
-def db(df:pd.DataFrame, table:str='Test'):
+def db(df:pd.DataFrame, table:str='raw_Test'):
     '''Connects to or creates and SQLite database and stores all scraped
     content in the specified table. If this process fails, the data is backed
     up in an csv file.'''
-    base = "contents_sqlite.db"
+    base = "stage.db"
     try:
         # Establishing the SQLite connection to the specified database file:
         connection = sqlite3.connect(base)
         # Writing the data to the specified table:
-        df.to_sql(table, connection, index=False, if_exists='append')
-        log("Connection established to \"" + base + "\", storing scraped data in table \"" + table + "\"")
+        df.to_sql("raw_" + table, connection, index=False, if_exists='append')
+        log("Connection established to \"" + base + "\", storing scraped data in table \"raw_" + table + "\"")
     except sqlite3.Error as error:
         # If no connection could be established, print the Error message and save the date in a csv file:
         log("Connection to " + base + " failed: " + str(error))
-        filename = 'backup.csv'
+        filename = 'scrape_backup.csv'
         log("Saving scraped data as " + filename)
         df.to_csv(filename, index=False, sep="\t")
 
@@ -147,7 +149,7 @@ if __name__ == "__main__":
 
     # Reading the list of websites to scrape:
     if len(sys.argv) > 1:
-        filename = str(sys.argv[1])
+        filename = str(sys.argv[1]) + ".txt"
     else:
         filename = 'Websites.txt'
 
