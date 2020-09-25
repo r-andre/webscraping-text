@@ -17,13 +17,26 @@ import time
 import sys
 import re
 
-def log(message:str):
+def log(message:str, name:str='scrape'):
     '''Writes a specified message to a log file including timestamp.'''
     print(message)
     # Creating or appending the log file and appending the message:
-    file = open('scrape_log.txt', 'a')
+    file = open(name + '_log.txt', 'a')
     file.write(str(pd.Timestamp.today()) + " " + message + "\n")
     file.close()
+
+def connect(base:str="test.db"):
+    '''Connects to an SQL database and either return the connection or an error
+    message if no connection could be established.'''
+    try:
+        # Establishing the SQLite connection to the specified database file:
+        connection = sqlite3.connect(base)
+        log("Connection established to \"" + base + "\"")
+        return connection
+    except sqlite3.Error as error:
+        # If no connection could be established, print the Error message and save the date in a csv file:
+        log("Connection to " + base + " failed: " + str(error) + ", terminating program")
+        raise Exception(error)
 
 def robot(url:str) -> list:
     '''Stores all sites and content disallowed by the robot.txt in a list.'''
@@ -36,7 +49,7 @@ def robot(url:str) -> list:
     except:
         # If the robots.txt is not accessible, the whole website is added to
         # the disallowed list:
-        log("Error! Response timeout for " + r)
+        log("Warning! Response timeout for " + r)
         disallow.append(re.search("[^/]*//[^/]*", url).group())
     else:
         soup = BeautifulSoup(response.text, "lxml")
@@ -69,7 +82,7 @@ def scrape(url:str, main:bool, disallow:list=[]):
         response = requests.get(url, timeout=3)
     except:
         # Returning an error message if no connection could be established:
-        log("Error! Response timeout for " + url) # log message
+        log("Warning! Response timeout for " + url) # log message
     else:
         # Checking for available access to the site:
         if int(response.status_code / 100) == 2: # response codes 2xx = positive response
@@ -79,18 +92,23 @@ def scrape(url:str, main:bool, disallow:list=[]):
                 print("Scraping " + url)
                 # Storing the title of the site:
                 if soup.title.string:
-                    title = soup.title.string
+                    title = soup.title.string.strip()
                 else:
-                    title
-                # Storing the text of the site:
-                text = soup.get_text("\r\n", strip=True)
+                    title = ""
+                # Storing the text (paragraphs only) of the site:
+                text = ""
+                for p in soup.findAll('p'):
+                    if p.string != None:
+                        text = " ".join([text, p.string]).replace("\xa0", " ").strip()
+                if text == "":
+                    raise Exception("Empty paragraphs")
             except:
                 # If no text could be scraped, return a warning message:
                 log("Warning! No text could be scraped for " + url) # log message
             else:
                 # Append the scraped information to the list of contents:
                 timestamp = str(pd.Timestamp.today().date())
-                contents.append((re.search("[^/]*//[^/]*", url).group(), url, title, text.replace(title, "")[2:], timestamp))
+                contents.append((re.search("[^/]*//[^/]*", url).group(), url, title, text, timestamp))
 
             if main:
                 # If the scraped site is the main site also collect all available links to sub-sites:
@@ -106,7 +124,7 @@ def scrape(url:str, main:bool, disallow:list=[]):
 
         else:
             # If access to the site was denied, return an error message:
-            log("Error! Response code " + str(response.status_code) + " for " + url) # log message
+            log("Warning! Response code " + str(response.status_code) + " for " + url) # log message
 
 def validate(df:pd.DataFrame):
     '''Checks if the scraped data is valid and as expected.'''
@@ -123,24 +141,6 @@ def validate(df:pd.DataFrame):
             # Check for duplicate lines in the table
             log("Validity check: duplicates detected")
 
-def db(df:pd.DataFrame, table:str='raw_Test'):
-    '''Connects to or creates and SQLite database and stores all scraped
-    content in the specified table. If this process fails, the data is backed
-    up in an csv file.'''
-    base = "stage.db"
-    try:
-        # Establishing the SQLite connection to the specified database file:
-        connection = sqlite3.connect(base)
-        # Writing the data to the specified table:
-        df.to_sql("raw_" + table, connection, index=False, if_exists='append')
-        log("Connection established to \"" + base + "\", storing scraped data in table \"raw_" + table + "\"")
-    except sqlite3.Error as error:
-        # If no connection could be established, print the Error message and save the date in a csv file:
-        log("Connection to " + base + " failed: " + str(error))
-        filename = 'scrape_backup.csv'
-        log("Saving scraped data as " + filename)
-        df.to_csv(filename, index=False, sep="\t")
-
 if __name__ == "__main__":
     start = pd.Timestamp.now()
 
@@ -151,7 +151,8 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         filename = str(sys.argv[1]) + ".txt"
     else:
-        filename = 'Websites.txt'
+        log("Error! No list of websites specified, program ended after " + str(pd.Timestamp.now() - start))
+        raise Exception("List of websites (as .txt file) is required as input")
 
     # Reading the list of websites to be scraped for text:
     file = open(filename, 'r')
@@ -168,8 +169,11 @@ if __name__ == "__main__":
     np.random.shuffle(hrefs)
 
     # Scraping every site in the list of sub-sites:
+    n = 1
     for subsite in hrefs:
          scrape(subsite, main=False)
+         print(str(n) + "/" + str(len(hrefs)))
+         n += 1
 
     # Converting the lists of data to a dataframe:
     df = pd.DataFrame(contents, columns=['Main', 'URL', 'Title', 'Text', 'Date']).sort_values(['Main', 'URL'])
@@ -177,9 +181,38 @@ if __name__ == "__main__":
     # Validating the data table:
     validate(df)
 
+    # Establishing connection to the database:
+    base = 'stage.db'
+    conn = connect('stage.db')
+    table = sys.argv[1]
     # Storing the scraped content in the database:
-    log("Writing scraped contents to database") # log message
-    db(df, table=filename[:-4]) # table name corresponds to filename of the list of websites
+    log("Writing scraped contents to database \"" + base + "\"")
+    try:
+        # Writing the data to the specified table:
+        df.to_sql("raw_" + table, conn, index=False, if_exists='append')
+        log("Storing scraped data in table \"raw_" + table + "\"")
+    except sqlite3.Error as error:
+        # If no connection could be established, print the Error message and save the date in a csv file:
+        log("Error! Connection to " + base + " failed: " + str(error))
+        filename = 'backup_scrape_' + table + '.csv'
+        log("Saving scraped data as " + filename)
+        df.to_csv(filename, index=False, sep="\t")
 
     end = pd.Timestamp.now()
-    log("Program ended after " + str(end - start))
+    log("Program successfully finished after " + str(end - start))
+
+# FOCUS ON GERMAN SITES
+# Add condition to line 117:
+#  and (re.search("[^/]*//[^/]*", url).group() + href != url)
+# Replace line 82:
+        # if main:
+        #     try:
+        #         response = requests.get(url + "/de", timeout=3)
+        #         if int(response.status_code / 100) == 2:
+        #             url += "/de"
+        #         else:
+        #             raise Exception("/de version not accessible")
+        #     except:
+        #         response = requests.get(url, timeout = 3)
+        # else:
+        #     response = requests.get(url, timeout=3)
