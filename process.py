@@ -7,12 +7,32 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 import pandas as pd
 import numpy as np
 import string
+import sys
 import re
-
-from module import connect, log
  
 # nltk.download('punkt')
 # nltk.download('stopwords')
+
+def log(message:str, name:str='process'):
+    '''Writes a specified message to a log file including timestamp.'''
+    print(message)
+    # Creating or appending the log file and appending the message:
+    file = open(name + '_log.txt', 'a')
+    file.write(str(pd.Timestamp.today()) + " " + message + "\n")
+    file.close()
+
+def connect(base:str="test.db"):
+    '''Connects to an SQL database and either return the connection or an error
+    message if no connection could be established.'''
+    try:
+        # Establishing the SQLite connection to the specified database file:
+        connection = sqlite3.connect(base)
+        log("Connection established to \"" + base + "\"")
+        return connection
+    except sqlite3.Error as error:
+        # If no connection could be established, print the Error message and save the date in a csv file:
+        log("Connection to " + base + " failed: " + str(error) + ", terminating program")
+        raise Exception(error)
 
 def join(raw:pd.DataFrame) -> pd.DataFrame:
     '''Joins the text content of multiple subsites of the same main website
@@ -92,7 +112,8 @@ def tokenize(df:pd.DataFrame, stop:list=None) -> pd.DataFrame:
         # Filter out stop words from the NLTK corpus and an optional list:
         try:
             log("... filtering stop-words")
-            stop_words = nltk.corpus.stopwords.words('german')
+            stop_words = nltk.corpus.stopwords.words('english')
+            stop_words.extend(nltk.corpus.stopwords.words('german'))
             if stop:
                 stop_words.extend(stop)
             stop_filter = lambda words: [w for w in words if not w in set(stop_words)]
@@ -100,12 +121,12 @@ def tokenize(df:pd.DataFrame, stop:list=None) -> pd.DataFrame:
         except:
             log("Warning! Filtering stop-words failed")
         # Stemming words using Snowball stemmer:
-        try:
-            log("... stemming words")
-            stem = lambda words: [nltk.stem.snowball.SnowballStemmer('german').stem(word) for word in words]
-            df.Text = df.Text.apply(stem)
-        except:
-            log("Warning! Stemming words failed")
+        # try:
+        #     log("... stemming words")
+        #     stem = lambda words: [nltk.stem.snowball.SnowballStemmer('german').stem(word) for word in words]
+        #     df.Text = df.Text.apply(stem)
+        # except:
+        #     log("Warning! Stemming words failed")
         # Removing non-ascii words that could not be stemmed (i.e. foreign language words)
         try:
             log("... removing non-ASCII words")
@@ -125,118 +146,158 @@ def tokenize(df:pd.DataFrame, stop:list=None) -> pd.DataFrame:
         df.Text = df.Text.apply(join)
     return df
 
-def freq(documents:list) -> dict:
+def freq(documents:list, min_df:float=0.05, max_df:float=0.90) -> list:
     '''Calculates term and document frequencies (TF, relTF, DF, IDF, TFIDF)
     from a list of documents and returns them as lists of dictionaries for each
-    of them.'''
+    of them. Also assigns a rank to each word in a document.'''
     log("Calculating term and document frequencies")
-    terms = [] # List of all terms
-    doc_terms = [] # List of all documents as lists of terms
-    log("... splitting documents and creating set of terms")
-    for doc in documents:
-        doc = doc.split()
-        doc_terms.append(doc)
-        terms.extend(doc)
-    # Creating a sorted list of all unique terms in all documents:
-    terms = list(set(terms))
-    terms.sort()
+    try:
+        # Converting documents to a matrix of TF-IDF features, only considering
+        # terms that appear in the mininum and maximum number of documents:
+        log("... vectorizing documents and extracting features")
+        vectorizer = TfidfVectorizer(min_df=min_df, max_df=max_df)
+        vectorizer.fit(documents)
+        # Creating list of features (= terms):
+        features = vectorizer.get_feature_names()
 
+        # Calculating inverse document frequency (IDF) using the vectorizer:
+        inv_doc_freq = []
+        log("... calculating inverse document frequency (IDF)")
+        for _ in range(0,len(documents)):
+            inv_doc_freq.append(dict(zip(features, vectorizer.idf_)))
+
+        # Calculating term frequency inverse document frequency (TFIDF):
+        term_freq_inv_doc_freq = []
+        log("... calculating term frequency inverse document frequency (TFIDF)")
+        for tfidf in vectorizer.transform(documents).toarray():
+            term_freq_inv_doc_freq.append(dict(zip(features, tfidf)))
+    except:
+        log("Error! Applying count vectorizer failed, program ended after " + str(pd.Timestamp.now() - start))
+        raise Exception("sklearn.TfidfVectorizer failed")
+
+    log("... calculating term frequency (TF) and relative term frequency (RTF)")
     # Calculating the term frequency (TF) of each document, i.e. the number of
     # times each term is used in each document:
-    log("... calculating term frequency (TF) and relative term frequency (RTF)")
-    term_freq = []
-    rel_term_freq = []
-    for doc in doc_terms:
-        tf = dict.fromkeys(terms, 0) # dictionary containing word frequencies
-        for term in doc:
-            tf[term] += 1
-        term_freq.append(tf)
+    try:
+        texts = [] # List of all documents as lists of terms
+        for text in documents:
+            text = text.split()
+            texts.append(text)
+        
+        term_freq = []
+        rel_term_freq = []
+        rank = []
+        for text in texts:
+            tf = dict.fromkeys(features, 0) # dictionary containing word frequencies
+            for term in features:
+                tf[term] = text.count(term)
+            term_freq.append(tf)
 
-        # Calculating the relative term frequency (RTF) in percent:
-        rtf = {} # dictionary containing relative term frequencies
-        size = len(doc)
-        for t, f in tf.items():
-            rtf[t] = f/size
-        rel_term_freq.append(rtf)
+            # Calculating the relative term frequency (RTF) in percent:
+            rtf = {} # dictionary containing relative term frequencies
+            for term, frequency in tf.items():
+                if len(text) > 0:
+                    rtf[term] = frequency / len(text)
+                else:
+                    rtf[term] = 0
+            rel_term_freq.append(rtf)
 
-    # Calculating the document frequency (DF) of each term, i.e. the number of
-    # documents each term is used in:
-    log("... calculating document frequency (DF)")
-    df = dict.fromkeys(term_freq[0], 0)
-    for term in df:
-        for d in term_freq:
-            if d[term] > 0:
-                df[term] += 1
-    doc_freq = []
-    for _ in range(0, len(term_freq)):
-        doc_freq.append(df)
+            # Generating the rank of the term in the text (based on the RTF):
+            tmp = {}
+            n = 1
+            for i in sorted(list(set(rtf.values())), reverse=True):
+                tmp[i] = n
+                n += 1
+            rnk = []
+            for i in rtf.values():
+                rnk.append(tmp[i])
+            rnk = dict(zip(rtf.keys(), rnk))
+            rank.append(rnk)
 
-    log("... vectorizing documents and extracting features")
-    # Converting documents to a matrix of TF-IDF features:
-    vectorizer = TfidfVectorizer()
-    vectorizer.fit(documents)
-    # Creating list of features (= terms):
-    features = vectorizer.get_feature_names()
+        # Calculating the document frequency (DF) of each term, i.e. the number of
+        # documents each term is used in:
+        log("... calculating document frequency (DF)")
+        df = dict.fromkeys(features, 0)
+        for term in features:
+            for text in texts:
+                if term in text:
+                    df[term] += 1
+        doc_freq = []
+        for _ in range(0, len(documents)):
+            doc_freq.append(df)
+    except:
+        log("Error! Calculating term frequencies failed, program ended after " + str(pd.Timestamp.now() - start))
+        raise Exception("Calculating term frequencies failed")
 
-    # Calculating inverse document frequency (IDF) using the vectorizer:
-    inv_doc_freq = []
-    log("... calculating inverse document frequency (IDF)")
-    for _ in range(0,len(documents)):
-        inv_doc_freq.append(dict(zip(features, vectorizer.idf_)))
-
-    # Calculating term frequency inverse document frequency (TFIDF):
-    term_freq_inv_doc_freq = []
-    log("... calculating term frequency inverse document frequency (TFIDF)")
-    for tfidf in vectorizer.transform(documents).toarray():
-        term_freq_inv_doc_freq.append(dict(zip(features, tfidf)))
-
-    log("Finished calculating term and document frequency")
-    return term_freq, rel_term_freq, doc_freq, inv_doc_freq, term_freq_inv_doc_freq
+    log("Finished calculating term and document frequencies")
+    return term_freq, rel_term_freq, rank, doc_freq, inv_doc_freq, term_freq_inv_doc_freq
 
 if __name__ == "__main__":
     log("Starting text processing")
     start = pd.Timestamp.now()
+    # Establishing connection to database:
+    conn = connect('stage.db')
     # Reading raw website data from the database table:
-    table = 'Startups100'
-    raw = pd.read_sql("SELECT * FROM raw_" + table, connect(base='Stage.db'))
+    if len(sys.argv) > 1:
+        table = str(sys.argv[1])
+    else:
+        log("Error! No data table specified, program ended after " + str(pd.Timestamp.now() - start))
+        raise Exception("Data table name is required as input")
+    raw = pd.read_sql("SELECT * FROM raw_" + table, conn)
+    log("Reading table \"" + table + "\"")
+
+    # Reading file containing stop words:
+    try:
+        log("Reading stop words from file \"stop.txt\"")
+        file = open('stop.txt', 'r')
+        stop = [line.strip("\n") for line in file.readlines()]
+        file.close()
+    except:
+        log("Warning! File containing stop words could not be read")
+        stop = []
+    
     # Joining and tokenizing all website texts:
     jnd = join(raw)
-    token = tokenize(jnd)
+    token = tokenize(jnd, stop=stop)
     # Storing the tokenized data in the database:
     try:
-        token.to_sql("token_" + table, connect(base='Stage.db'), index=False, if_exists='append')
+        token.to_sql("token_" + table, conn, index=False, if_exists='append')
         log("Storing token data as table \"token_" + table + "\"" + " in the database")
     except:
         log("Warning! Storing data in database failed, saving as \"backup_token_" + table + "\" instead")
         token.to_csv("backup_token_" + table + ".csv", index=False, sep='\t')
 
     # Calculating text features for each text:
-    tf, rtf, df, idf, tfidf = freq(token.Text)
+    tf, rtf, r, df, idf, tfidf = freq(token.Text)
 
-    # Creating data tables of text features:
-    log("Creating data table with text features")
-    results = pd.DataFrame()
-    for i in range(0, len(jnd.Site)):
-        frame = pd.DataFrame({
-            'Site' : jnd.Site.iloc[i],
-            'Date' : jnd.Date.iloc[i],
-            'Term' : list(tf[i].keys()),
-            'TF' : list(tf[i].values()),
-            'rTF' : list(rtf[i].values()),
-            'DF' : list(tf[i].values()),
-            'IDF' : list(idf[i].values()),
-            'TFIDF' : list(tfidf[i].values()),
-        }).set_index(['Site', 'Date', 'Term'])
-        results = pd.concat([results, frame])
-    results = results.reset_index()
-
-    # Storing the features of the data in the database:
+    # Creating data table of text features:
     try:
-        results.to_sql("feat_" + table, connect(base='Stage.db'), index=False, if_exists='append')
+        log("Creating data table with features")
+        results = pd.DataFrame()
+        for i in range(0, len(jnd.Site)):
+            frame = pd.DataFrame({
+                'Site' : jnd.Site.iloc[i],
+                'Date' : jnd.Date.iloc[i],
+                'Term' : list(tf[i].keys()),
+                'TF' : list(tf[i].values()),
+                'rTF' : list(rtf[i].values()),
+                'DF' : list(df[i].values()),
+                'IDF' : list(idf[i].values()),
+                'TFIDF' : list(tfidf[i].values()),
+                'Rank' : list(r[i].values())
+            }).set_index(['Site', 'Date', 'Term'])
+            results = pd.concat([results, frame])
+        results = results.reset_index()
+    except:
+        log("Error! Creading data table failed, program ended after " + str(pd.Timestamp.now() - start))
+
+    # Storing the data and its features in the database:
+    try:
+        results.to_sql("feat_" + table, conn, index=False, if_exists='append')
         log("Storing token data as table \"feat_" + table + "\"" + " in the database")
     except:
         log("Warning! Storing data in database failed, saving as \"backup_token_" + table + "\" instead")
         results.to_csv("backup_feat_" + table + ".csv", index=False, sep='\t')
 
     end = pd.Timestamp.now()
-    log("Program ended after " + str(end - start))
+    log("Program sucessfully finished after " + str(end - start))
